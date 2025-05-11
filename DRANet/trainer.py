@@ -247,11 +247,12 @@ class Trainer:
         batch_data = dict()
         for dset in self.args.datasets:
             try:
-                batch_data[dset] = batch_data_iter[dset].next()
+                batch_data[dset] = next(batch_data_iter[dset])
             except StopIteration:
                 batch_data_iter[dset] = iter(self.train_loader[dset])
-                batch_data[dset] = batch_data_iter[dset].next()
+                batch_data[dset] = next(batch_data_iter[dset])
         return batch_data
+        
 
     def train_dis(self, imgs):  # Train Discriminators (D)
         self.set_zero_grad()

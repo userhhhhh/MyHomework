@@ -23,7 +23,7 @@ def get_args():
     parser.add_argument('--workers', type=int, default=0)
     parser.add_argument('--batch', type=int)
     parser.add_argument('--imsize', type=int, help='the height of the input image')
-    parser.add_argument('--iter', type=int, default=100000, help='total training iterations')
+    parser.add_argument('--iter', type=int, default=10000, help='total training iterations')
     parser.add_argument('--manualSeed', type=int, default=5688)
     parser.add_argument('--ex', help='Experiment name')
     parser.add_argument('--logfile', type=str)

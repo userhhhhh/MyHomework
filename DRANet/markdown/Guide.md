@@ -9,6 +9,10 @@ python /home/featurize/data/download_mnist_m.py
 ```
 然后将 data 文件夹移动到 DRANet 文件夹目录下
 
+## 改进的采用
+
+在 trainer.py 的 trainer 里面有 arg，决定是否采用优化
+
 ## 环境配置
 
 pip install tensorboardX scipy prettytable

@@ -62,6 +62,9 @@ class Trainer:
     def __init__(self, args):
         self.args = args
         self.training_converts, self.test_converts, self.tensorboard_converts = set_converts(args.datasets, args.task)
+        self.arg_use_entropy = False
+        self.arg_use_vat = False
+        self.arg_use_D_optimization = False
         if args.task == 'seg':
             self.imsize = (2 * args.imsize, args.imsize)  # (width, height)
             self.best_miou = 0.
@@ -257,12 +260,24 @@ class Trainer:
     def train_dis(self, imgs):  # Train Discriminators (D)
         self.set_zero_grad()
         features, converted_imgs, D_outputs_fake, D_outputs_real = dict(), dict(), dict(), dict()
+        classifier_outputs, combined = dict(), dict()
 
         # Real
         for dset in self.args.datasets:
             features[dset] = self.nets['E'](imgs[dset])
             if self.args.task == 'clf':
-                D_outputs_real[dset] = self.nets['D'][dset](imgs[dset])
+                ##################################################################
+                if self.arg_use_D_optimization:
+                    classifier_outputs[dset] = torch.softmax(self.nets['T'][f'{dset}2{dset}'](imgs[dset]), dim=1)
+                    # 展开特征和分类器输出，做逐元素乘积
+                    f = features[dset].view(features[dset].size(0), -1)
+                    p = classifier_outputs[dset]
+                    # 这里假设类别数较少，可以直接做外积，否则可用逐元素乘积
+                    combined[dset] = torch.bmm(p.unsqueeze(2), f.unsqueeze(1)).view(f.size(0), -1)
+                    D_outputs_real[dset] = self.nets['D'][dset](combined[dset])
+                ##################################################################
+                else:
+                    D_outputs_real[dset] = self.nets['D'][dset](imgs[dset])
             else:
                 D_outputs_real[dset] = self.nets['D'][dset](slice_patches(imgs[dset]))
 
@@ -279,7 +294,17 @@ class Trainer:
             source, target = convert.split('2')
             converted_imgs[convert] = self.nets['G'](contents[convert], styles[target])
             if self.args.task == 'clf':
-                D_outputs_fake[convert] = self.nets['D'][target](converted_imgs[convert])
+                ##################################################################
+                if self.arg_use_D_optimization:
+                    features_fake = self.nets['E'](converted_imgs[convert])
+                    classifier_outputs_fake = torch.softmax(self.nets['T'][convert](converted_imgs[convert]), dim=1)
+                    f_fake = features_fake.view(features_fake.size(0), -1)
+                    p_fake = classifier_outputs_fake
+                    combined_fake = torch.bmm(p_fake.unsqueeze(2), f_fake.unsqueeze(1)).view(f_fake.size(0), -1)
+                    D_outputs_fake[convert] = self.nets['D'][target](combined_fake)
+                ##################################################################
+                else:
+                    D_outputs_fake[convert] = self.nets['D'][target](converted_imgs[convert])
             else:
                 D_outputs_fake[convert] = self.nets['D'][target](slice_patches(converted_imgs[convert]))
                 
@@ -335,6 +360,7 @@ class Trainer:
         perceptual, style_gram = dict(), dict()
         perceptual_converted, style_gram_converted = dict(), dict()
         con_sim = dict()
+        preds = dict()  # 新增: 存储预测结果
         for dset in self.args.datasets:
             features[dset] = self.nets['E'](imgs[dset])
             recon_imgs[dset] = self.nets['G'](features[dset], 0)
@@ -348,6 +374,7 @@ class Trainer:
                 con_sim[convert], styles[target] = cadt(contents[source], contents[target], styles[target])
                 style_gram[target] = cadt_gram(style_gram[target], con_sim[convert])
             converted_imgs[convert] = self.nets['G'](contents[convert], styles[target])
+            preds[convert] = self.nets['G'](contents[convert], styles[target])  # 新增：获取预测结果
             if self.args.task == 'clf':
                 D_outputs_fake[convert] = self.nets['D'][target](converted_imgs[convert])
             else:
@@ -363,7 +390,21 @@ class Trainer:
         G_loss = self.loss_fns.gen(D_outputs_fake)
         Recon_loss = self.loss_fns.recon(imgs, recon_imgs)
 
-        errESG = G_loss + Content_loss + Style_loss + Consistency_loss + Recon_loss
+        # errESG = G_loss + Content_loss + Style_loss + Consistency_loss + Recon_loss
+        ########################################################################################
+        Entropy_loss = self.loss_fns.entropy(preds)  # 熵最小化损失
+        VAT_loss = self.loss_fns.vat_loss(self.nets, converted_imgs)  # VAT损失
+        alpha = 0
+        beta = 0.01
+
+        if self.arg_use_entropy == False:
+            alpha = 0
+        if self.arg_use_vat == False:
+            beta = 0
+            
+        errESG = G_loss + Content_loss + Style_loss + Consistency_loss + Recon_loss \
+                + alpha * Entropy_loss + beta * VAT_loss
+        ########################################################################################
 
         errESG.backward()
         for net in ['E', 'S', 'G']:
@@ -374,6 +415,11 @@ class Trainer:
         self.losses['Consis'] = Consistency_loss.data.item()
         self.losses['Content'] = Content_loss.data.item()
         self.losses['Style'] = Style_loss.data.item()
+        ########################################################################################
+        self.losses['Entropy'] = Entropy_loss.data.item()
+        self.losses['VAT'] = VAT_loss.data.item()
+        ########################################################################################
+
 
     def tensor_board_log(self, imgs, labels):
         nrow = 8 if self.args.task == 'clf' else 2

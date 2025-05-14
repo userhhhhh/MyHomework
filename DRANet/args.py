@@ -66,7 +66,7 @@ def get_args():
             args.tensor_freq = 100
     if args.eval_freq is None:
         if args.task == 'clf':
-            args.eval_freq = 10000
+            args.eval_freq = 200 # 修改的参数
         elif args.task == 'seg':
             args.eval_freq = 1000
     return args

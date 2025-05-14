@@ -9,7 +9,10 @@ from .batchinstancenorm import BatchInstanceNorm2d as Normlayer
 import functools
 from functools import partial
 import torchvision.transforms as ttransforms
+from torchvision.models import resnet18
 
+USE_NEW_Discriminator = True
+USE_NEW_Generator = True
 
 class ResidualBlock(nn.Module):
     def __init__(self, in_channels, filters=64, kernel_size=3, stride=1, padding=1):
@@ -83,21 +86,44 @@ class Separator(nn.Module):
                 contents[cv] = self.w[cv] * contents[source]
         return contents, styles
 
+if USE_NEW_Generator == False:
+    class Generator(nn.Module):
+        def __init__(self, channels=512):
+            super(Generator, self).__init__()
+            self.model = nn.Sequential(
+                spectral_norm(nn.ConvTranspose2d(64, 32, kernel_size=3, stride=1, padding=1, bias=True)),
+                nn.ReLU(True),
+                ResidualBlock(32, 32),
+                ResidualBlock(32, 32),
+                spectral_norm(nn.ConvTranspose2d(32, 3, kernel_size=4, stride=2, padding=1, bias=True)),
+                nn.Tanh()
+            )
 
-class Generator(nn.Module):
-    def __init__(self, channels=512):
-        super(Generator, self).__init__()
-        self.model = nn.Sequential(
-            spectral_norm(nn.ConvTranspose2d(64, 32, kernel_size=3, stride=1, padding=1, bias=True)),
-            nn.ReLU(True),
-            ResidualBlock(32, 32),
-            ResidualBlock(32, 32),
-            spectral_norm(nn.ConvTranspose2d(32, 3, kernel_size=4, stride=2, padding=1, bias=True)),
-            nn.Tanh()
-        )
+        def forward(self, content, style):
+            return self.model(content+style)
 
-    def forward(self, content, style):
-        return self.model(content+style)
+else:
+    class Generator(nn.Module):
+        def __init__(self, channels=512):
+            super(Generator, self).__init__()
+            self.model = nn.Sequential(
+                spectral_norm(nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1)),  # 保持分辨率
+                nn.BatchNorm2d(128),
+                nn.ReLU(True),
+
+                ResidualBlock(128, 128),
+                ResidualBlock(128, 128),
+
+                spectral_norm(nn.Conv2d(128, 64, kernel_size=3, stride=1, padding=1)),
+                nn.BatchNorm2d(64),
+                nn.ReLU(True),
+
+                spectral_norm(nn.ConvTranspose2d(64, 3, kernel_size=4, stride=2, padding=1)),
+                nn.Tanh()
+            )
+
+        def forward(self, content, style):
+            return self.model(content + style)
 
 
 class Classifier(nn.Module):
@@ -189,37 +215,112 @@ class Discriminator_USPS(nn.Module):
         output = self.fc(output)
         return output
 
+if USE_NEW_Discriminator == False:
+    class Discriminator_MNIST(nn.Module):
+        def __init__(self, channels=3):
+            super(Discriminator_MNIST, self).__init__()
+            self.conv = nn.Sequential(
+                spectral_norm(nn.Conv2d(channels, 32, kernel_size=4, stride=2, padding=1, bias=True)),
+                nn.ReLU(True),
+                spectral_norm(nn.Conv2d(32, 32, kernel_size=3, stride=1, padding=1, bias=True)),
+                nn.ReLU(True),
+                spectral_norm(nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1, bias=True)),
+                nn.ReLU(True),
+                spectral_norm(nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1, bias=True)),
+                nn.ReLU(True),
+                spectral_norm(nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1, bias=True)),
+                nn.ReLU(True),
+                spectral_norm(nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1, bias=True)),
+                nn.ReLU(True),
+                spectral_norm(nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1, bias=True)),
+                nn.ReLU(True)
+            )
+            self.fc = nn.Sequential(
+                nn.Linear(256*4*4, 1),
+                nn.Sigmoid()
+            )
 
-class Discriminator_MNIST(nn.Module):
-    def __init__(self, channels=3):
-        super(Discriminator_MNIST, self).__init__()
-        self.conv = nn.Sequential(
-            spectral_norm(nn.Conv2d(channels, 32, kernel_size=4, stride=2, padding=1, bias=True)),
-            nn.ReLU(True),
-            spectral_norm(nn.Conv2d(32, 32, kernel_size=3, stride=1, padding=1, bias=True)),
-            nn.ReLU(True),
-            spectral_norm(nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1, bias=True)),
-            nn.ReLU(True),
-            spectral_norm(nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1, bias=True)),
-            nn.ReLU(True),
-            spectral_norm(nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1, bias=True)),
-            nn.ReLU(True),
-            spectral_norm(nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1, bias=True)),
-            nn.ReLU(True),
-            spectral_norm(nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1, bias=True)),
-            nn.ReLU(True)
-        )
-        self.fc = nn.Sequential(
-            nn.Linear(256*4*4, 1),
-            nn.Sigmoid()
-        )
+        def forward(self, x):
+            output = self.conv(x)
+            output = output.view(output.size(0),-1)
+            output = self.fc(output)
+            return output
 
-    def forward(self, x):
-        output = self.conv(x)
-        output = output.view(output.size(0),-1)
-        output = self.fc(output)
-        return output
+else:
+    class Discriminator_MNIST(nn.Module):
+        def __init__(self):
+            super(Discriminator_MNIST, self).__init__()
 
+            # 基于 ResNet18 的浅层特征提取器（不加载预训练）
+            base = resnet18(pretrained=False)
+            base.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+            base.maxpool = nn.Identity()
+
+            self.feature_extractor = nn.Sequential(
+                base.conv1, base.bn1, base.relu,
+                base.layer1,  # 输出: [B, 64, 32, 32]
+                base.layer2   # 输出: [B, 128, 32, 32]
+            )
+
+            # 更深的卷积网络（新增多层）
+            self.extra_conv = nn.Sequential(
+                spectral_norm(nn.Conv2d(128, 256, 3, stride=2, padding=1)),  # -> [B, 256, 16, 16]
+                nn.ReLU(True),
+                spectral_norm(nn.Conv2d(256, 256, 3, stride=1, padding=1)),  # -> [B, 256, 16, 16]
+                nn.ReLU(True),
+                spectral_norm(nn.Conv2d(256, 512, 3, stride=2, padding=1)),  # -> [B, 512, 8, 8]
+                nn.ReLU(True),
+                spectral_norm(nn.Conv2d(512, 512, 3, stride=1, padding=1)),  # -> [B, 512, 8, 8]
+                nn.ReLU(True),
+                spectral_norm(nn.Conv2d(512, 512, 3, stride=2, padding=1)),  # -> [B, 512, 4, 4]
+                nn.ReLU(True),
+            )
+
+            self.classifier = nn.Sequential(
+                nn.AdaptiveAvgPool2d((1, 1)),      # -> [B, 512, 1, 1]
+                nn.Flatten(),                      # -> [B, 512]
+                spectral_norm(nn.Linear(512, 1)),  # -> [B, 1]
+                nn.Sigmoid()
+            )
+
+        def forward(self, x):
+            feat = self.feature_extractor(x)   # -> [B, 128, 32, 32]
+            feat = self.extra_conv(feat)       # -> [B, 512, 2, 2] -> GAP -> [B, 512]
+            out = self.classifier(feat)        # -> [B, 1]
+            return out
+
+
+# class Discriminator_MNIST(nn.Module):
+#     def __init__(self):
+#         super(Discriminator_MNIST, self).__init__()
+#         # 加载 ResNet18，不加载预训练权重
+#         base = resnet18(pretrained=False)
+
+#         # 修改第一个卷积层，适配 MNIST/MNIST-M 输入分辨率
+#         base.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+#         base.maxpool = nn.Identity()  # 移除最大池化，保留更多空间信息
+
+#         # 只保留卷积部分作为特征提取器
+#         self.feature_extractor = nn.Sequential(
+#             base.conv1,
+#             base.bn1,
+#             base.relu,
+#             base.layer1,
+#             base.layer2
+#         )
+
+#         # 全局平均池化 + 判别器输出
+#         self.classifier = nn.Sequential(
+#             nn.AdaptiveAvgPool2d((1, 1)),
+#             nn.Flatten(),
+#             spectral_norm(nn.Linear(128, 1)),
+#             nn.Sigmoid()
+#         )
+
+#     def forward(self, x):
+#         feat = self.feature_extractor(x)  # [B, 512, H', W']
+#         out = self.classifier(feat)       # [B, 1]
+#         return out
 
 class PatchGAN_Discriminator(nn.Module):
     def __init__(self, channels=3):

@@ -268,12 +268,23 @@ class Trainer:
             if self.args.task == 'clf':
                 ##################################################################
                 if self.arg_use_D_optimization:
-                    classifier_outputs[dset] = torch.softmax(self.nets['T'][f'{dset}2{dset}'](imgs[dset]), dim=1)
+                    # print('Using D optimization')
+                    # print(self.nets['T'].keys())
+                    # print(dset)
+                    if dset == 'M':
+                        classifier_outputs[dset] = torch.softmax(self.nets['T']['M2MM'](imgs[dset]), dim=1)
+                    if dset == 'MM':
+                        classifier_outputs[dset] = torch.softmax(self.nets['T']['MM2M'](imgs[dset]), dim=1)
+                    # print('Classifier outputs:', classifier_outputs[dset].shape)
+                    # print('imgs:', imgs[dset].shape)
                     # 展开特征和分类器输出，做逐元素乘积
                     f = features[dset].view(features[dset].size(0), -1)
+                    # f = features[dset]
                     p = classifier_outputs[dset]
+                    combined[dset] = f * p.unsqueeze(-1).unsqueeze(-1)
+                    # print('Combined shape:', combined[dset].shape)
                     # 这里假设类别数较少，可以直接做外积，否则可用逐元素乘积
-                    combined[dset] = torch.bmm(p.unsqueeze(2), f.unsqueeze(1)).view(f.size(0), -1)
+                    # combined[dset] = torch.bmm(p.unsqueeze(2), f.unsqueeze(1)).view(f.size(0), -1)
                     D_outputs_real[dset] = self.nets['D'][dset](combined[dset])
                 ##################################################################
                 else:

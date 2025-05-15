@@ -2,6 +2,8 @@
 
 ## dataset下载
 
+### mnist_m
+
 ```
 pip install datasets
 cp /home/featurize/work/DRANet/script/download_mnist_m.py /home/featurize/data
@@ -9,9 +11,17 @@ python /home/featurize/data/download_mnist_m.py
 ```
 然后将 data 文件夹移动到 DRANet 文件夹目录下
 
+### cityscape
+
+```
+cd data/cityscape
+git clone https://github.com/mcordts/cityscapesScripts
+加载
+```
+
 ## 改进的采用
 
-在 trainer.py 的 trainer 里面有 arg，决定是否采用优化
+见 `idea.md`
 
 ## 环境配置
 

@@ -64,7 +64,48 @@ class Trainer:
         self.training_converts, self.test_converts, self.tensorboard_converts = set_converts(args.datasets, args.task)
         self.arg_use_entropy = False
         self.arg_use_vat = False
-        self.arg_use_D_optimization = False
+        self.arg_use_D_optimization = True
+        self.arg_D_try1 = False
+        self.arg_D_try2 = True
+
+        if self.arg_use_D_optimization:
+
+            # 固定设置（根据 Encoder 结构）
+            feature_channels = 64  # Encoder 最后一层输出通道数
+            num_classes = 10       # 根据任务调整（如 MNIST=10）
+
+            # 新增适配层 (Adapter)
+            if self.arg_D_try1:
+                self.adapter = nn.ModuleDict({
+                    'M': nn.Sequential(
+                        nn.Conv2d(feature_channels * num_classes, 3, kernel_size=1),
+                        nn.Upsample(size=(64, 64), mode='bilinear', align_corners=False)
+                    ),
+                    'MM': nn.Sequential(
+                        nn.Conv2d(feature_channels * num_classes, 3, kernel_size=1),
+                        nn.Upsample(size=(64, 64), mode='bilinear', align_corners=False)
+                    )
+                })
+            elif self.arg_D_try2:
+                self.adapter = nn.ModuleDict({
+                    'M': nn.Conv2d(64, 3, kernel_size=1),
+                    'MM': nn.Conv2d(64, 3, kernel_size=1)
+                })
+            # 新增 p_projector、gate
+            self.p_projector = nn.ModuleDict({
+                dset: nn.Linear(num_classes, feature_channels)  # e.g., 10 -> 64
+                for dset in self.args.datasets
+            })
+            self.gate = nn.ModuleDict({
+                dset: nn.Conv2d(feature_channels, 1, kernel_size=1)
+                for dset in self.args.datasets
+            })
+            
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            self.adapter = self.adapter.to(self.device)
+            self.p_projector = self.p_projector.to(self.device)
+            self.gate = self.gate.to(self.device)
+
         if args.task == 'seg':
             self.imsize = (2 * args.imsize, args.imsize)  # (width, height)
             self.best_miou = 0.
@@ -160,7 +201,7 @@ class Trainer:
             else:
                 self.nets['D'][dset] = PatchGAN_Discriminator()
         self.nets['T'] = dict()
-        for cv in self.test_converts:
+        for cv in self.test_converts:  
             if self.args.task == 'clf':
                 self.nets['T'][cv] = Classifier()
             elif self.args.task == 'seg':
@@ -268,24 +309,49 @@ class Trainer:
             if self.args.task == 'clf':
                 ##################################################################
                 if self.arg_use_D_optimization:
-                    # print('Using D optimization')
-                    # print(self.nets['T'].keys())
-                    # print(dset)
+                    # 1. 获取分类器输出
                     if dset == 'M':
                         classifier_outputs[dset] = torch.softmax(self.nets['T']['M2MM'](imgs[dset]), dim=1)
-                    if dset == 'MM':
+                    elif dset == 'MM':
                         classifier_outputs[dset] = torch.softmax(self.nets['T']['MM2M'](imgs[dset]), dim=1)
-                    # print('Classifier outputs:', classifier_outputs[dset].shape)
-                    # print('imgs:', imgs[dset].shape)
-                    # 展开特征和分类器输出，做逐元素乘积
-                    f = features[dset].view(features[dset].size(0), -1)
-                    # f = features[dset]
-                    p = classifier_outputs[dset]
-                    combined[dset] = f * p.unsqueeze(-1).unsqueeze(-1)
-                    # print('Combined shape:', combined[dset].shape)
-                    # 这里假设类别数较少，可以直接做外积，否则可用逐元素乘积
-                    # combined[dset] = torch.bmm(p.unsqueeze(2), f.unsqueeze(1)).view(f.size(0), -1)
-                    D_outputs_real[dset] = self.nets['D'][dset](combined[dset])
+
+                    # # 2. 计算联合表示 f(x) ⊗ p(y|x)
+                    if self.arg_D_try1:
+                        f = features[dset].to(self.device)                        # [B, C, H, W]
+                        p = classifier_outputs[dset].to(self.device)              # [B, K]
+
+                        combined = torch.einsum('bchw,bk->bkchw', f, p)           # [B, K, C, H, W]
+                        combined = combined.view(combined.size(0), -1, *f.shape[2:])  # [B, K*C, H, W]
+                        # 3. 用 Adapter 调整通道数 -> [B, 3, H, W]
+                        combined = self.adapter[dset](combined)
+
+                        # 4. 输入判别器
+                        D_outputs_real[dset] = self.nets['D'][dset](combined)
+                        # print('D_combined[dset].shape:', combined.shape)
+                        # print('D_imgs[dset].shape:', imgs[dset].shape)
+                    elif self.arg_D_try2:
+                        f = features[dset].to(self.device)                        # [B, C, H, W]
+                        p = classifier_outputs[dset].to(self.device)              # [B, K]
+
+                        # print('f.shape:', f.shape)
+                        # print('p.shape:', p.shape)
+
+                        p_proj = self.p_projector[dset](p)                        # [B, C]
+                        p_proj = p_proj.unsqueeze(-1).unsqueeze(-1)               # [B, C, 1, 1]
+                        # print('p_proj.shape:', p_proj.shape)
+
+                        gate = torch.sigmoid(self.gate[dset](f))                  # [B, 1, H, W]
+
+                        combined[dset] = (1 - gate) * f + gate * (f * p_proj)     # [B, C, H, W]
+                        # print('D_combined2[dset].shape:', combined[dset].shape)
+                        combined[dset] = self.adapter[dset](combined[dset])       # [B, 3, H, W]
+                        # print('D_combined1[dset].shape:', combined[dset].shape)
+                        combined[dset] = F.interpolate(combined[dset], size=(64, 64), mode='bilinear', align_corners=False)
+
+                        # print('D_combined[dset].shape:', combined[dset].shape)
+                        # print('D_imgs[dset].shape:', imgs[dset].shape)
+                        D_outputs_real[dset] = self.nets['D'][dset](combined[dset])
+
                 ##################################################################
                 else:
                     D_outputs_real[dset] = self.nets['D'][dset](imgs[dset])
@@ -307,12 +373,33 @@ class Trainer:
             if self.args.task == 'clf':
                 ##################################################################
                 if self.arg_use_D_optimization:
-                    features_fake = self.nets['E'](converted_imgs[convert])
-                    classifier_outputs_fake = torch.softmax(self.nets['T'][convert](converted_imgs[convert]), dim=1)
-                    f_fake = features_fake.view(features_fake.size(0), -1)
-                    p_fake = classifier_outputs_fake
-                    combined_fake = torch.bmm(p_fake.unsqueeze(2), f_fake.unsqueeze(1)).view(f_fake.size(0), -1)
-                    D_outputs_fake[convert] = self.nets['D'][target](combined_fake)
+                    # 1. 获取fake特征和分类概率
+                    features_fake = self.nets['E'](converted_imgs[convert])  # [B, 64, H, W]
+                    classifier_outputs_fake = torch.softmax(self.nets['T'][convert](converted_imgs[convert]), dim=1)  # [B, num_classes]
+                    
+                    if self.arg_D_try1:
+                        # 2. 计算联合表示 (保持4D结构)
+                        # 方法1：使用einsum保持空间结构
+                        combined_fake = torch.einsum('bchw,bk->bkchw', features_fake, classifier_outputs_fake)  # [B, K, C, H, W]
+                        combined_fake = combined_fake.view(combined_fake.size(0), -1, *combined_fake.shape[3:])  # [B, K*C, H, W]
+                        
+                        # 3. 通过适配层调整通道数
+                        combined_fake = self.adapter[target](combined_fake)  # [B, 3, H, W]
+                        
+                        # 4. 输入判别器
+                        D_outputs_fake[convert] = self.nets['D'][target](combined_fake)
+                    elif self.arg_D_try2:
+                        p_proj_fake = self.p_projector[target](classifier_outputs_fake)          # [B, C]
+                        p_proj_fake = p_proj_fake.unsqueeze(-1).unsqueeze(-1)                    # [B, C, 1, 1]
+
+                        gate_fake = torch.sigmoid(self.gate[target](features_fake))              # [B, 1, H, W]
+
+                        combined_fake = (1 - gate_fake) * features_fake + gate_fake * (features_fake * p_proj_fake)
+                        combined_fake = self.adapter[target](combined_fake)                      # [B, 3, H, W]
+                        # print('combined_fake.shape:', combined_fake.shape)
+                        combined_fake = F.interpolate(combined_fake, size=(64, 64), mode='bilinear', align_corners=False)
+                        D_outputs_fake[convert] = self.nets['D'][target](combined_fake)
+
                 ##################################################################
                 else:
                     D_outputs_fake[convert] = self.nets['D'][target](converted_imgs[convert])

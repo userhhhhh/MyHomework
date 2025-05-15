@@ -11,8 +11,9 @@ from functools import partial
 import torchvision.transforms as ttransforms
 from torchvision.models import resnet18
 
-USE_NEW_Discriminator = True
+USE_NEW_Discriminator = False
 USE_NEW_Generator = True
+USE_D_OPTIMIZATION = False
 
 class ResidualBlock(nn.Module):
     def __init__(self, in_channels, filters=64, kernel_size=3, stride=1, padding=1):
@@ -86,7 +87,7 @@ class Separator(nn.Module):
                 contents[cv] = self.w[cv] * contents[source]
         return contents, styles
 
-if USE_NEW_Generator == False:
+if USE_NEW_Generator == False and USE_NEW_Discriminator == False:
     class Generator(nn.Module):
         def __init__(self, channels=512):
             super(Generator, self).__init__()
@@ -101,6 +102,31 @@ if USE_NEW_Generator == False:
 
         def forward(self, content, style):
             return self.model(content+style)
+
+elif USE_NEW_Discriminator == True and USE_NEW_Generator == False:
+    class Generator(nn.Module):
+        def __init__(self, channels=512):
+            super(Generator, self).__init__()
+            self.model = nn.Sequential(
+                spectral_norm(nn.ConvTranspose2d(64, 64, kernel_size=3, stride=1, padding=1, bias=True)),
+                nn.ReLU(True),
+
+                ResidualBlock(64, 64),
+                ResidualBlock(64, 64),
+                ResidualBlock(64, 64),  # 新增一层 residual 增强表达
+
+                spectral_norm(nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1, bias=True)),  # 上采样到更高分辨率
+                nn.ReLU(True),
+
+                spectral_norm(nn.Conv2d(32, 32, kernel_size=3, stride=1, padding=1)),
+                nn.ReLU(True),
+
+                spectral_norm(nn.Conv2d(32, 3, kernel_size=3, stride=1, padding=1)),
+                nn.Tanh()
+            )
+
+        def forward(self, content, style):
+            return self.model(content + style)
 
 else:
     class Generator(nn.Module):

@@ -18,6 +18,8 @@ import torch.backends.cudnn as cudnn
 import logging
 import random
 
+from torch.autograd import Function
+
 
 def get_mean_and_std(dataset):
     '''Compute the mean and std value of dataset.'''
@@ -142,3 +144,16 @@ def slice_patches(imgs, hight_slice=2, width_slice=4):
     patches = patches.transpose(1,2)
     patches = patches.reshape(-1, c, h_patch, w_patch)
     return patches
+
+class GradReverse(Function):
+    @staticmethod
+    def forward(ctx, x, lambda_):
+        ctx.lambda_ = lambda_
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output.neg() * ctx.lambda_, None
+
+def grad_reverse(x, lambda_=1.0):
+    return GradReverse.apply(x, lambda_)

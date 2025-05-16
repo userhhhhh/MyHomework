@@ -12,7 +12,7 @@ import torchvision.transforms as ttransforms
 from torchvision.models import resnet18
 
 USE_NEW_Discriminator = False
-USE_NEW_Generator = True
+USE_NEW_Generator = False
 USE_D_OPTIMIZATION = False
 
 class ResidualBlock(nn.Module):
@@ -314,39 +314,6 @@ else:
             feat = self.extra_conv(feat)       # -> [B, 512, 2, 2] -> GAP -> [B, 512]
             out = self.classifier(feat)        # -> [B, 1]
             return out
-
-
-# class Discriminator_MNIST(nn.Module):
-#     def __init__(self):
-#         super(Discriminator_MNIST, self).__init__()
-#         # 加载 ResNet18，不加载预训练权重
-#         base = resnet18(pretrained=False)
-
-#         # 修改第一个卷积层，适配 MNIST/MNIST-M 输入分辨率
-#         base.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
-#         base.maxpool = nn.Identity()  # 移除最大池化，保留更多空间信息
-
-#         # 只保留卷积部分作为特征提取器
-#         self.feature_extractor = nn.Sequential(
-#             base.conv1,
-#             base.bn1,
-#             base.relu,
-#             base.layer1,
-#             base.layer2
-#         )
-
-#         # 全局平均池化 + 判别器输出
-#         self.classifier = nn.Sequential(
-#             nn.AdaptiveAvgPool2d((1, 1)),
-#             nn.Flatten(),
-#             spectral_norm(nn.Linear(128, 1)),
-#             nn.Sigmoid()
-#         )
-
-#     def forward(self, x):
-#         feat = self.feature_extractor(x)  # [B, 512, H', W']
-#         out = self.classifier(feat)       # [B, 1]
-#         return out
 
 class PatchGAN_Discriminator(nn.Module):
     def __init__(self, channels=3):

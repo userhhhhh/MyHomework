@@ -57,6 +57,13 @@ def set_converts(datasets, task):
 
     return training_converts, test_converts, tensorboard_converts
 
+class View(nn.Module):
+    def __init__(self, shape):
+        super(View, self).__init__()
+        self.shape = shape
+
+    def forward(self, x):
+        return x.view(*self.shape)
 
 class Trainer:
     def __init__(self, args):
@@ -64,9 +71,18 @@ class Trainer:
         self.training_converts, self.test_converts, self.tensorboard_converts = set_converts(args.datasets, args.task)
         self.arg_use_entropy = False
         self.arg_use_vat = False
-        self.arg_use_D_optimization = True
+        self.arg_use_D_optimization = True  # 加入 p(y|x) 的优化
         self.arg_D_try1 = False
-        self.arg_D_try2 = True
+        self.arg_D_try2 = False
+        self.arg_D_try3 = False
+        self.arg_D_try4 = True
+        self.grl_lambda = 1.0
+        self.current_iter = 0
+        self.total_iters = 10000
+        self.rand_low_dim = 64
+
+        if self.arg_D_try3:
+            self.arg_D_try2 = True
 
         if self.arg_use_D_optimization:
 
@@ -91,6 +107,35 @@ class Trainer:
                     'M': nn.Conv2d(64, 3, kernel_size=1),
                     'MM': nn.Conv2d(64, 3, kernel_size=1)
                 })
+            elif self.arg_D_try4:
+                # self.adapter = nn.ModuleDict({
+                #     'M': nn.Sequential(
+                #         nn.Linear(self.rand_low_dim, 128 * 8 * 8),         # [B, 8192]
+                #         nn.ReLU(),
+                #         View([-1, 128, 8, 8]),                              # reshape to [B, 128, 8, 8]
+                #         nn.Conv2d(128, 64, kernel_size=3, padding=1),
+                #         nn.ReLU(),
+                #         nn.Conv2d(64, 3, kernel_size=3, padding=1),
+                #         nn.Upsample(size=(64, 64), mode='bilinear', align_corners=False)
+                #     ),
+                #     'MM': nn.Sequential(
+                #         nn.Linear(self.rand_low_dim, 128 * 8 * 8),
+                #         nn.ReLU(),
+                #         View([-1, 128, 8, 8]),
+                #         nn.Conv2d(128, 64, kernel_size=3, padding=1),
+                #         nn.ReLU(),
+                #         nn.Conv2d(64, 3, kernel_size=3, padding=1),
+                #         nn.Upsample(size=(64, 64), mode='bilinear', align_corners=False)
+                #     )
+                # })
+                self.adapter = nn.ModuleDict({
+                    'M': nn.Conv2d(64, 3, kernel_size=1),
+                    'MM': nn.Conv2d(64, 3, kernel_size=1)
+                })
+                self.rand_proj = nn.ModuleDict({
+                    'M': nn.Linear(feature_channels * num_classes, self.rand_low_dim, bias=False),
+                    'MM': nn.Linear(feature_channels * num_classes, self.rand_low_dim, bias=False)
+                })
             # 新增 p_projector、gate
             self.p_projector = nn.ModuleDict({
                 dset: nn.Linear(num_classes, feature_channels)  # e.g., 10 -> 64
@@ -105,6 +150,7 @@ class Trainer:
             self.adapter = self.adapter.to(self.device)
             self.p_projector = self.p_projector.to(self.device)
             self.gate = self.gate.to(self.device)
+            self.rand_proj = self.rand_proj.to(self.device)
 
         if args.task == 'seg':
             self.imsize = (2 * args.imsize, args.imsize)  # (width, height)
@@ -296,6 +342,10 @@ class Trainer:
                 batch_data_iter[dset] = iter(self.train_loader[dset])
                 batch_data[dset] = next(batch_data_iter[dset])
         return batch_data
+
+    def get_grl_lambda(current_iter, max_iter, max_lambda=1.0):
+        p = float(current_iter) / max_iter
+        return max_lambda * (2. / (1. + np.exp(-10 * p)) - 1.)
         
 
     def train_dis(self, imgs):  # Train Discriminators (D)
@@ -348,9 +398,37 @@ class Trainer:
                         # print('D_combined1[dset].shape:', combined[dset].shape)
                         combined[dset] = F.interpolate(combined[dset], size=(64, 64), mode='bilinear', align_corners=False)
 
+                        if self.arg_D_try3:
+                            self.grl_lambda = get_grl_lambda(self.current_iter, self.total_iters)
+                            combined[dset] = grad_reverse(combined[dset], lambda_=self.grl_lambda)
+
                         # print('D_combined[dset].shape:', combined[dset].shape)
                         # print('D_imgs[dset].shape:', imgs[dset].shape)
                         D_outputs_real[dset] = self.nets['D'][dset](combined[dset])
+
+                    elif self.arg_D_try4:
+                        f = features[dset].to(self.device)                        # [B, C, H, W]
+                        p = classifier_outputs[dset].to(self.device)              # [B, K]
+
+                        B, C, H, W = f.shape
+                        K = p.shape[1]
+
+                        # 1. 构造联合表示
+                        joint = torch.einsum('bchw,bk->bkchw', f, p)              # [B, K, C, H, W]
+                        joint = joint.view(B, K * C, H, W)                        # [B, K*C, H, W]
+                        # 2. 展平 + 转置 -> [B, H*W, K*C]
+                        joint_flat = joint.view(B, K * C, -1).permute(0, 2, 1)    # [B, H*W, K*C]
+                        # 3. 线性降维 -> [B, H*W, low_dim]
+                        joint_proj = self.rand_proj[dset](joint_flat)
+                        # 4. reshape 成 [B, low_dim, H, W]
+                        joint_proj = joint_proj.permute(0, 2, 1).contiguous().view(B, self.rand_low_dim, H, W)
+                        # 5. 映射通道 + 判别器
+                        combined = self.adapter[dset](joint_proj)                 # [B, 3, H, W]
+                        # print('D_combined[dset].shape:', combined.shape)
+                        # print('D_imgs[dset].shape:', imgs[dset].shape)
+                        combined = F.interpolate(combined, size=(64, 64), mode='bilinear', align_corners=False)
+                        # print('D_combined[dset].shape:', combined.shape)
+                        D_outputs_real[dset] = self.nets['D'][dset](combined)
 
                 ##################################################################
                 else:
@@ -397,6 +475,28 @@ class Trainer:
                         combined_fake = (1 - gate_fake) * features_fake + gate_fake * (features_fake * p_proj_fake)
                         combined_fake = self.adapter[target](combined_fake)                      # [B, 3, H, W]
                         # print('combined_fake.shape:', combined_fake.shape)
+                        combined_fake = F.interpolate(combined_fake, size=(64, 64), mode='bilinear', align_corners=False)
+                        
+                        if self.arg_D_try3:
+                            self.grl_lambda = get_grl_lambda(self.current_iter, self.total_iters)
+                            self.current_iter += 1
+                            combined_fake = grad_reverse(combined_fake, lambda_=self.grl_lambda)
+
+                        D_outputs_fake[convert] = self.nets['D'][target](combined_fake)
+                    
+                    elif self.arg_D_try4:
+                        f = features_fake
+                        p = classifier_outputs_fake
+                        B, C, H, W = f.shape
+                        K = p.shape[1]
+
+                        joint = torch.einsum('bchw,bk->bkchw', f, p)              # [B, K, C, H, W]
+                        joint = joint.view(B, K * C, H, W)                        # [B, K*C, H, W]
+                        joint_flat = joint.view(B, K * C, -1).permute(0, 2, 1)    # [B, H*W, K*C]
+                        joint_proj = self.rand_proj[target](joint_flat)           # [B, H*W, low_dim]
+                        joint_proj = joint_proj.permute(0, 2, 1).contiguous().view(B, self.rand_low_dim, H, W)
+
+                        combined_fake = self.adapter[target](joint_proj)          # [B, 3, H, W]
                         combined_fake = F.interpolate(combined_fake, size=(64, 64), mode='bilinear', align_corners=False)
                         D_outputs_fake[convert] = self.nets['D'][target](combined_fake)
 

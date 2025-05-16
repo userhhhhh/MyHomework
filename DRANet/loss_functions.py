@@ -59,42 +59,6 @@ class Loss_Functions:
         #         print(f"{key}: {value}")
 
  ##########################################################################
-    # def entropy(self, pred):
-    #     """
-    #     计算目标域（无标签）预测的 entropy loss。
-    #     适用于 pred 是 softmax logits 字典，键是数据集名（例如 'MM'）。
-    #     """
-    #     ent_loss = 0
-    #     for dset in pred.keys():
-    #         if dset == 'MM':  # 只对 MNIST-M（目标域）使用 entropy loss
-    #             probs = F.softmax(pred[dset], dim=1)
-    #             ent = -torch.sum(probs * torch.log(probs + 1e-6), dim=1).mean()
-    #             ent_loss += ent
-    #     return 0.01 * ent_loss  # α 可调
-
-    # def vat(self, model, x, xi=10.0, eps=1.0, ip=1):
-    #     """
-    #     计算 VAT loss（虚拟对抗训练）用于目标域样本。
-    #     model: 分类器，输入 x 输出 logits
-    #     x: 目标域输入图像（如 MNIST-M 图像）
-    #     """
-    #     with torch.no_grad():
-    #         pred = F.softmax(model(x), dim=1)
-
-    #     d = torch.randn_like(x)
-    #     d = F.normalize(d, p=2, dim=(1, 2, 3))
-
-    #     for _ in range(ip):
-    #         d.requires_grad_()
-    #         pred_hat = F.log_softmax(model(x + xi * d), dim=1)
-    #         loss = F.kl_div(pred_hat, pred, reduction='batchmean')
-    #         grad = torch.autograd.grad(loss, d, retain_graph=True)[0]
-    #         d = F.normalize(grad, p=2, dim=(1, 2, 3))
-
-    #     r_adv = eps * d
-    #     pred_hat = F.log_softmax(model(x + r_adv), dim=1)
-    #     vat_loss = F.kl_div(pred_hat, pred, reduction='batchmean')
-    #     return 0.1 * vat_loss  # β 可调
     def entropy(self, pred):
         """
         计算目标域的熵最小化损失

@@ -48,5 +48,5 @@ example) python test.py -T clf -D M MM --ex M2MM --load_step 10000
 看到所有训练结果，这个只依赖于tensorboard文件夹
 ```
 cd to DRANet
-CUDA_VISIBLE_DEVICES=-1 tensorboard --logdir tensorboard --bind_all
+CUDA_VISIBLE_DEVICES=-1 tensorboard --logdir tensorboard1 --bind_all
 ```
